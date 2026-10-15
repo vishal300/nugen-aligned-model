@@ -1,0 +1,11 @@
+
+
+Verified corrections from production feedback:
+Question: An API key was committed to a public repo. What should I do first?
+Correct answer: security
+
+Question: An API key was committed to a public repo. What should I do first?
+Correct answer: security
+
+Question: After we moved to Azure, our Django app times out on database queries
+Correct answer: backend + database or cloud

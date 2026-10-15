@@ -1,0 +1,303 @@
+DATABASE.TXT — POSTGRESQL AND SQL PROBLEMS Practical diagnosis for query
+performance, locking, connections, migrations, and replication
+
+1.  Slow queries and EXPLAIN ANALYZE
+
+A query that suddenly takes seconds may be scanning too many rows,
+sorting a large result, waiting on a lock, or reading data from disk.
+Start with the exact SQL and representative parameters, then run
+EXPLAIN (ANALYZE, BUFFERS) in a safe environment because ANALYZE
+actually executes the query and can trigger side effects for statements
+that modify data. Compare estimated rows with actual rows, look at the
+most expensive plan nodes, and inspect shared-buffer hits and reads. A
+plan showing a large row count early in the tree often means the
+database is doing too much work before filtering. Never assume an index
+is missing simply because a query is slow; first distinguish execution
+time from lock wait and network or application overhead.
+
+2.  Sequential scan versus index scan
+
+A sequential scan reads table pages and checks rows, while an index scan
+uses an index to locate candidate rows and then fetches matching table
+data. A sequential scan is often faster for a small table or a query
+returning a large fraction of rows because index lookups can involve
+many scattered page reads. An index scan is often useful when a
+predicate selects a small subset of a large table. Use EXPLAIN ANALYZE
+to compare actual rows and timing, and remember that the planner’s
+choice depends on table statistics, cache state, and cost settings. Do
+not force an index plan as a first response; stale statistics or a poor
+index definition may be the real problem.
+
+3.  When an index helps
+
+An index helps when it supports a frequently used filter, join,
+ordering, or uniqueness requirement and avoids enough table work to
+justify its maintenance cost. For example, an index on
+orders(customer_id) may help a query that retrieves a customer’s recent
+orders from a large table. The index can be less useful if the query
+returns most of the table, if the predicate transforms the indexed value
+in a way that prevents normal index use, or if the query’s real
+bottleneck is a lock wait. Indexes consume disk and make inserts,
+updates, and deletes more expensive because index entries must also be
+maintained. Use workload statistics and actual query plans to prioritize
+indexes that solve a demonstrated problem.
+
+4.  Low selectivity
+
+A low-selectivity column has only a few distinct values relative to the
+number of rows, such as a boolean is_active column where 95 percent of
+rows are true. A normal index on that column may not help a query asking
+for active rows because PostgreSQL would need to visit most of the table
+anyway. If a query repeatedly retrieves a small subset, a partial index
+can be better, such as
+CREATE INDEX CONCURRENTLY idx_orders_pending_created ON orders (created_at) WHERE status = 'pending';.
+The query predicate must match the partial-index condition closely
+enough for the planner to prove that the index applies. Check the
+resulting plan and remember that partial indexes only cover rows meeting
+their predicate.
+
+5.  Composite index column order
+
+A multicolumn B-tree index is most effective when its leading columns
+align with common equality filters and the query’s access pattern. For
+example, (tenant_id, created_at) can support queries filtering by a
+tenant and a date range, but may not be as useful for a query filtering
+only by created_at. Column order also matters for sorting and range
+conditions, so design the index from real query shapes rather than from
+a list of columns that happen to appear in the table. Avoid creating
+every possible permutation, since each index costs storage and write
+throughput. Verify the expected query with EXPLAIN (ANALYZE, BUFFERS)
+before and after adding an index.
+
+6.  Function calls and casts on indexed columns
+
+A query may ignore a regular index when its predicate wraps the indexed
+column in a function or casts it to another type. For example,
+WHERE lower(email) = 'a@example.com' may need an expression index on
+lower(email) rather than a plain index on email. Similarly, implicit or
+explicit type conversions can prevent a plan from using the intended
+index efficiently. Prefer consistent column and parameter types, and
+consider a functional index only when the expression is common and
+stable. Confirm with the execution plan; rewriting SQL without checking
+the plan can merely move the cost elsewhere.
+
+7.  Outdated planner statistics
+
+PostgreSQL uses statistics to estimate how many rows a predicate will
+return and choose a plan. If estimates are far from actual rows, the
+planner may choose a nested loop that performs thousands of lookups or a
+scan that reads much more data than expected. Run ANALYZE table_name;
+after large data changes when automatic statistics collection has not
+caught up, and inspect autovacuum and analyze activity. For skewed data,
+increasing the statistics target for a column may improve estimates, but
+it adds analysis work and should be justified by evidence. Compare
+estimated and actual row counts across plan nodes rather than looking
+only at the total runtime.
+
+8.  Sorts, hashes, and work_mem
+
+A query with Sort Method: external merge or temporary disk usage may be
+spilling intermediate data to disk because the operation needs more
+memory than allowed. This can happen with large ORDER BY, DISTINCT, hash
+joins, and aggregations. Check EXPLAIN ANALYZE and temporary-file logs
+before changing work_mem, because it can be consumed by multiple plan
+nodes and concurrent sessions. Increasing it globally can multiply
+memory demand under load and cause the server to run out of memory.
+Prefer reducing rows before sorting, adding an appropriate index for a
+common order, or setting a measured per-session value for a controlled
+workload.
+
+9.  N+1 queries from application code
+
+A database may look healthy at the server level while an application
+performs hundreds of small queries for one HTTP request. This pattern
+often occurs when an ORM retrieves a list and then fetches a related row
+for every item. Use query logs or tracing to measure queries per
+request, then batch access or use joins and prefetching. In Django,
+select_related() is generally suited to foreign-key and one-to-one
+relations, while prefetch_related() is suited to collections and
+many-to-many relations. Validate the improvement with both query count
+and response time, since a single enormous join can also be inefficient.
+
+10. Deadlocks
+
+A deadlock occurs when two or more transactions each hold a lock the
+other needs, so PostgreSQL aborts one transaction to break the cycle.
+For example, transaction A updates account 1 then account 2, while
+transaction B updates account 2 then account 1. Check PostgreSQL logs
+for the deadlock report, including the statements and lock details, and
+establish a consistent order for touching shared rows. Keep transactions
+short and retry the entire transaction when the error is a genuine
+deadlock, using bounded retries and jitter. Do not blindly retry every
+database error; constraint violations and malformed SQL will not be
+fixed by repeating the operation.
+
+11. Long-running transactions
+
+Long transactions keep locks for longer, can block schema changes, and
+may prevent vacuum from removing old row versions that are still visible
+to the transaction. A common warning sign is a session that has been
+idle in transaction for many minutes. Inspect pg_stat_activity for
+xact_start, state, and wait_event, and use pg_blocking_pids(pid) to find
+blockers. Commit or roll back promptly, avoid making network calls
+inside database transactions, and set an appropriate
+idle_in_transaction_session_timeout where compatible with the
+application. Terminate sessions only after identifying the owner and
+impact, because cancellation can roll back substantial work.
+
+12. Lock waits during deployments
+
+A migration that alters a busy table can wait for a strong lock while
+normal queries continue to hold weaker locks. If the migration later
+acquires the lock, it may briefly block application traffic, so even a
+metadata-only change can cause an outage when lock acquisition is poorly
+managed. Set a short lock_timeout for risky deployment migrations and
+fail fast rather than queueing behind a long transaction indefinitely.
+Use pg_stat_activity, pg_locks, and pg_blocking_pids() to inspect the
+wait chain. Test migrations under representative traffic and split risky
+operations into multiple backward-compatible releases.
+
+13. Connection pool exhaustion
+
+When the application cannot obtain a database connection, requests may
+stall or fail even though PostgreSQL itself is still responding to
+existing sessions. The cause may be too many web workers, leaked
+connections, long transactions, background jobs, or a database
+connection limit that is too low for the total fleet. Check
+pg_stat_activity grouped by application name and state, and compare
+connection counts with the configured maximum. Reduce unnecessary
+concurrency, close connections correctly, and use a pooler when the
+workload creates many short-lived sessions. Increasing max_connections
+without reviewing memory and workload can make the database less stable
+rather than solving the underlying issue.
+
+14. Why PgBouncer helps
+
+PgBouncer sits between applications and PostgreSQL and can reuse a
+smaller number of database connections for a larger number of clients.
+Transaction pooling is often effective for applications that do not
+depend on session state surviving across transactions, while session
+pooling preserves a connection for the client’s session. Some features,
+such as session-level settings, temporary tables, and certain
+prepared-statement patterns, need special care in transaction-pooling
+mode. Configure pool sizes based on database capacity and monitor
+waiting clients, active server connections, and pool saturation.
+PgBouncer reduces connection overhead; it does not make a slow query
+fast or remove the need to control transaction duration.
+
+15. Safe migrations on large tables
+
+Adding a constraint or changing a column on a large, busy table can
+require a scan or a lock that disrupts writes. Prefer an
+expand-and-contract migration: add a compatible nullable field, deploy
+code that supports both forms, backfill in batches, and apply stronger
+constraints only after the data is ready. For a PostgreSQL index on a
+live table, CREATE INDEX CONCURRENTLY can reduce write blocking, though
+it takes longer and has operational restrictions, including not running
+inside a normal transaction block. Monitor progress through
+pg_stat_progress_create_index and watch disk space. Have a clear
+recovery plan because a failed concurrent index build can leave an
+invalid index that needs cleanup.
+
+16. Backfills and batch sizing
+
+A one-shot update across millions of rows can generate heavy WAL, hold
+locks, increase replication lag, and create a large rollback if
+interrupted. Process records in bounded batches, commit each batch, and
+make the job resumable using a stable key or checkpoint. Start with a
+conservative batch size, such as a few hundred or thousand rows, then
+tune based on lock duration, database load, and replica lag. Use an
+index to find the next batch efficiently and avoid repeatedly scanning
+already-processed rows. Make the backfill idempotent so it can safely
+resume after a worker crash.
+
+17. Replication lag
+
+A read replica can serve stale data when it has not replayed the
+primary’s write-ahead log quickly enough. Lag may increase because of a
+write spike, slow replica storage, long-running queries that conflict
+with replay, or network limitations. Monitor replay delay and WAL
+positions using PostgreSQL replication views and the cloud provider’s
+replica-lag metrics. Route consistency-sensitive reads to the primary,
+or use an explicit wait/consistency mechanism where the product requires
+a recent write to be visible. Do not fail over to a lagging replica
+without understanding the possible data-loss window and the provider’s
+promotion semantics.
+
+18. Vacuum and table bloat
+
+Frequent updates and deletes create dead row versions that PostgreSQL’s
+vacuum process must eventually reclaim for reuse. If autovacuum falls
+behind, tables and indexes can grow, query performance may deteriorate,
+and transaction ID wraparound risk can become serious. Check
+pg_stat_user_tables for dead tuples and vacuum timestamps, then inspect
+autovacuum logs and thresholds. Fix long-running transactions that
+prevent cleanup and tune per-table autovacuum settings only after
+measuring the workload. VACUUM generally makes space reusable inside the
+relation but does not usually return all unused disk space to the
+operating system.
+
+19. Disk space and WAL growth
+
+A full database disk can prevent writes, break maintenance tasks, and
+threaten service availability. Causes include unexpectedly large tables
+or indexes, retained WAL due to a stalled replica or replication slot,
+excessive logs, and failed jobs creating temporary files. Check
+filesystem usage and PostgreSQL views for replication slots and WAL
+retention, and identify the source before deleting files. Never manually
+delete PostgreSQL data-directory files or WAL segments to free space;
+use supported retention and cleanup procedures. Increase capacity or
+reduce safe sources of growth, then add alerts with enough headroom to
+act before the disk reaches 100 percent.
+
+20. Query cancellation and statement timeouts
+
+A runaway query can consume CPU, I/O, locks, or memory and delay
+unrelated work. Use statement_timeout to bound query execution for
+appropriate application roles, but set values according to legitimate
+workload needs and avoid one short global limit for all maintenance
+tasks. pg_cancel_backend(pid) requests cancellation of a running
+statement, while pg_terminate_backend(pid) ends the session and may
+cause transaction rollback. Identify the query and its owner before
+acting, and prefer cancellation over termination when it is sufficient.
+Add application-side deadlines too, so web requests do not wait
+indefinitely for database work.
+
+21. Unique constraints and concurrent writes
+
+An application-level check such as “look up the email, then insert if
+absent” is vulnerable to races because two requests can both observe
+that no row exists. Enforce the invariant with a database UNIQUE
+constraint and handle the conflict in application code. Use
+INSERT ... ON CONFLICT when its semantics fit the operation, and keep
+related changes in one transaction. Before adding a unique constraint to
+a large existing table, find and resolve duplicates, then choose a
+deployment strategy that limits locking. The database should be the
+final authority for uniqueness rather than relying only on application
+checks.
+
+22. Parameterized SQL and query correctness
+
+Building SQL by concatenating user input can create SQL injection
+vulnerabilities and can also produce fragile query behavior. Use
+parameterized statements or ORM query APIs so values are passed
+separately from SQL syntax. For example, use
+cursor.execute("SELECT id FROM orders WHERE customer_id = %s", [customer_id])
+rather than interpolating the value into the string. Parameters are for
+values, not arbitrary table or column identifiers; dynamic identifiers
+must come from a strict allowlist and be quoted safely. Parameterization
+also improves clarity and can help the driver reuse query plans, though
+plan reuse is not guaranteed in every context.
+
+23. Incident checklist for PostgreSQL
+
+First determine whether the problem is query execution, lock contention,
+connection saturation, storage pressure, or replica delay. Capture a few
+representative slow queries and inspect pg_stat_activity, wait events,
+blockers, database metrics, and recent deployment changes. Avoid
+restarting the database as a first step, because it can hide the
+evidence and create a larger recovery event. Apply the smallest safe
+mitigation, such as canceling a confirmed runaway query or pausing a
+heavy backfill, then verify that latency and error rates recover.
+Document the root cause and add a query regression test, alert, or
+operational limit so the same failure is easier to detect next time.

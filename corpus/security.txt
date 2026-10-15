@@ -1,0 +1,318 @@
+SECURITY.TXT — AUTHENTICATION AND EXPOSURE Practical response guidance
+for tokens, secrets, web vulnerabilities, cloud permissions, and
+suspected breaches
+
+1.  Expired or invalid access tokens
+
+An API may return 401 when a token is expired, malformed, signed by an
+untrusted issuer, or intended for another audience. Validate the token’s
+signature, issuer, audience, expiry (exp), not-before (nbf), and
+required scopes or claims using the identity provider’s supported
+library rather than trusting decoded JWT text. Confirm that the API
+expects the token type the client is sending; an ID token is not
+generally a substitute for an API access token. Check server time
+synchronization and key-rotation behavior if otherwise valid tokens
+suddenly fail. Never paste production bearer tokens into tickets or chat
+to debug them, because anyone who obtains the token may be able to reuse
+it.
+
+2.  JWT clock skew
+
+A token can appear not yet valid or expired when client and server
+clocks differ. Check system time synchronization and compare the current
+UTC time with the token’s iat, nbf, and exp claims without exposing the
+token itself. A small, documented clock-skew allowance may be supported
+by the identity library, but making the tolerance very large weakens
+expiry enforcement. Ensure containers and hosts use reliable time
+synchronization and investigate any drift across regions. Do not fix
+clock errors by disabling expiration checks or accepting arbitrary
+timestamps.
+
+3.  401 versus 403
+
+A 401 response usually means the request has not presented acceptable
+authentication credentials, while a 403 usually means the caller is
+authenticated but lacks permission for the requested action. Exact
+behavior depends on the authentication scheme and framework, so inspect
+the API’s configured authentication and authorization layers. For a 401,
+check token validity, issuer, audience, expiry, and header format; for a
+403, check roles, scopes, tenant restrictions, resource ownership, and
+policy decisions. Avoid removing authorization checks to make an
+endpoint work. Add tests for a valid authorized caller, a valid but
+unauthorized caller, and a caller with missing or invalid credentials.
+
+4.  Secret leakage: contain before cleanup
+
+If a password, API key, signing key, or cloud credential is exposed,
+treat it as compromised even if the repository is private. First revoke
+or rotate the credential, assess where it was used, and review access
+logs for suspicious activity; then remove the secret from source, build
+artifacts, logs, tickets, and repository history as appropriate.
+Rewriting Git history alone does not invalidate copies already cloned or
+cached, so it must not replace rotation. Coordinate dependent services
+to avoid an avoidable outage during rotation, and verify the new
+credential works before disabling any temporary overlap. Record the
+incident and preserve relevant evidence without copying the secret into
+the incident report.
+
+5.  Secret storage and rotation
+
+Secrets embedded in source code, container images, CI logs, or
+configuration committed to Git can be copied long after a deployment.
+Store them in a managed secret service or protected deployment
+configuration, restrict access through workload identity, and audit
+secret reads. Rotate credentials according to risk and provider
+requirements, and ensure the rotation process can update all consumers
+without manual edits scattered across environments. Prefer short-lived
+tokens or managed identities over long-lived static keys when the
+platform supports them. Never log secret values while debugging
+configuration failures; log the secret’s identifier or version instead.
+
+6.  SQL injection
+
+SQL injection occurs when untrusted input is interpreted as part of a
+SQL statement rather than as a value. Use ORM filters or parameterized
+queries, and never build a SQL string by concatenating user-supplied
+text. In Django, Model.objects.filter(email=email) or a parameterized
+cursor query is safer than interpolating email into SQL. Parameters
+cannot usually stand in for identifiers such as table or column names,
+so dynamic identifiers must be selected from a strict allowlist and
+quoted using the database driver’s supported methods. Add tests with
+quotes and SQL metacharacters, and review raw SQL paths as well as
+ordinary ORM usage.
+
+7.  Cross-site scripting (XSS)
+
+XSS happens when attacker-controlled content is rendered as executable
+browser content, allowing scripts to act in a user’s session. Use
+context-aware output encoding, Django’s template autoescaping, and safe
+DOM APIs; avoid marking user content as trusted HTML unless it has been
+sanitized with a maintained allowlist sanitizer. Do not rely on a
+Content Security Policy as the only defense, although a carefully tested
+CSP can reduce impact. Review rich-text fields, HTML email previews,
+markdown rendering, and client-side code that writes to innerHTML. Test
+stored, reflected, and DOM-based cases and ensure that one user’s
+submitted content cannot execute in another user’s browser.
+
+8.  Cross-site request forgery (CSRF)
+
+CSRF can cause a browser to send an authenticated state-changing request
+without the user’s informed intent when authentication relies on
+automatically attached cookies. For Django session-based applications,
+keep CSRF middleware enabled, include the CSRF token in unsafe requests,
+and configure trusted origins precisely. SameSite cookie settings
+provide defense in depth but do not replace proper CSRF protection in
+every deployment. Avoid using GET requests to make state changes, and
+verify login, logout, password-change, and administrative flows. APIs
+using bearer tokens supplied explicitly by clients have a different CSRF
+risk profile, but cookie-based authentication still requires careful
+protection.
+
+9.  CORS misconfiguration
+
+Cross-Origin Resource Sharing controls which browser origins may read
+responses from an API; it is not an authentication system. A wildcard
+origin combined with credentials is invalid in standard browser CORS
+behavior and overly broad origin reflection can expose data to untrusted
+sites. Configure an explicit allowlist of trusted origins, restrict
+allowed methods and headers, and enable credentials only when required.
+In Django, review the exact CORS middleware settings and ensure they are
+not confused with CSRF_TRUSTED_ORIGINS. Test preflight OPTIONS requests
+and credentialed requests from both permitted and denied origins. Do not
+assume that a successful command-line request proves browser CORS policy
+is correct.
+
+10. Over-permissive IAM roles
+
+A cloud identity with broad administrator permissions can turn a single
+compromised service into a full environment compromise. Apply least
+privilege by granting only the actions and resources needed, prefer
+scoped roles and workload identities, and separate deployment, runtime,
+and emergency privileges. Review wildcard actions and resources, unused
+permissions, long-lived access keys, and cross-account trust
+relationships. Use audit logs to determine which identity performed a
+sensitive action and when. Test permission reductions in a
+non-production environment and maintain a controlled break-glass process
+rather than giving every service permanent administrator access.
+
+11. Open ports and network exposure
+
+An unnecessarily exposed port can make a database, debug console,
+metrics endpoint, or administration interface reachable by untrusted
+clients. Inventory public listeners and compare firewall rules with the
+actual service requirements, then close unused ports and restrict
+administrative access to approved networks or managed access paths. A
+service bound to 0.0.0.0 inside a container may be exposed through its
+service or load-balancer configuration, so inspect the full network
+path. Do not expose PostgreSQL or remote administration ports directly
+to the public internet unless a tightly justified and controlled
+architecture requires it. Recheck exposure from outside the trusted
+network after the change.
+
+12. Dependency vulnerabilities
+
+A vulnerable package is not automatically exploitable in every
+deployment, but the risk depends on the affected version, reachable code
+path, exploit conditions, and available mitigations. Generate a
+dependency inventory and scan direct and transitive packages using
+maintained tools, then prioritize actively exploited vulnerabilities and
+issues affecting exposed runtime paths. Upgrade to a patched compatible
+version, test the application, and rebuild the artifact from a trusted
+pipeline. If no patch exists, consider a documented mitigation such as
+disabling the affected feature or restricting access while monitoring
+for a fix. Avoid blindly upgrading every dependency in production
+without tests, but do not leave critical exploitable vulnerabilities
+unowned.
+
+13. Suspected breach: first actions
+
+When a breach is suspected, prioritize containment and evidence
+preservation over cosmetic cleanup. Notify the designated security and
+incident-response contacts, identify affected identities and systems,
+revoke or rotate compromised credentials, and isolate affected workloads
+when doing so will not destroy essential evidence. Preserve relevant
+audit logs, timestamps, image digests, and access records in a
+controlled location. Determine what data or privileges may have been
+accessed, and follow the organization’s legal, regulatory, and
+customer-notification process rather than making unsupported claims. Do
+not delete suspicious files or wipe systems before responders have
+decided what evidence must be retained.
+
+14. Audit logs and suspicious activity
+
+Audit logs can show unusual sign-ins, privilege changes, secret reads,
+firewall changes, or unexpected API calls. Establish a baseline for
+normal service identities and alert on meaningful deviations such as a
+new privileged role assignment, authentication from an unexpected
+location, or a sudden increase in failed logins. Ensure log timestamps
+are consistent and that logs are protected against unauthorized
+modification. Avoid storing access tokens, passwords, or unnecessary
+personal data in telemetry, because logs become a high-value target.
+During an investigation, preserve the original events and record which
+queries or exports were performed.
+
+15. Brute force and credential stuffing
+
+Repeated failed sign-ins may indicate a user mistyping a password, an
+automated brute-force attempt, or credential stuffing using leaked
+password lists. Use identity-provider protections, rate limits,
+risk-based controls, multi-factor authentication, and monitoring rather
+than relying only on account lockouts that attackers can abuse to deny
+service. Alert on distributed failures, repeated attempts against many
+accounts, and successful sign-ins following unusual failure patterns. Do
+not expose whether an account exists in public login error messages.
+Review affected accounts for session activity and revoke sessions when
+compromise is plausible.
+
+16. Session management
+
+A stolen session cookie may remain usable even after a user changes a
+password unless the application or identity system invalidates it. Use
+Secure and HttpOnly cookie attributes, an appropriate SameSite policy,
+TLS, and sensible session lifetimes. Regenerate session identifiers
+after authentication or privilege changes and invalidate sessions on
+logout and other high-risk events. Avoid putting session tokens in URLs,
+where they can leak through browser history, logs, and referrer headers.
+Verify the actual cookie behavior in production and ensure reverse-proxy
+settings correctly communicate HTTPS to the application.
+
+17. OAuth redirect URI problems
+
+An overly broad or poorly validated redirect URI can allow authorization
+responses or codes to be sent to an attacker-controlled destination.
+Register exact redirect URIs with the identity provider, validate them
+using the provider’s supported flow, and use state and nonce protections
+where required by the protocol. Avoid wildcard redirects and do not
+build redirect destinations directly from an untrusted query parameter.
+For authorization-code flows, exchange codes securely on the server when
+that is the intended architecture and use PKCE where appropriate. Test
+both the normal callback and malformed or unregistered redirect
+attempts.
+
+18. Token audience and issuer validation
+
+A validly signed token can still be unacceptable to an API if it was
+issued for another audience or by an untrusted issuer. Validate issuer
+and audience explicitly using the identity provider’s metadata and
+supported token-validation library. Do not accept any token signed by a
+known public key without checking the claims that bind it to the
+intended application and tenant. During a migration between identity
+providers, define which issuers and audiences are accepted and for how
+long, rather than broadly trusting both systems indefinitely. Add
+negative tests using a token from the wrong API or tenant.
+
+19. File upload security
+
+File uploads can introduce malware, oversized payloads, path traversal,
+parser vulnerabilities, and storage exhaustion. Enforce size limits,
+validate file type using content inspection as well as client-provided
+metadata, generate server-side filenames, and store uploads outside
+executable application paths. Scan files where the risk and workflow
+justify it, and process complex formats in isolated workers with
+resource limits. Never trust a filename or extension as proof that a
+file is safe. Restrict who can download uploaded files and avoid making
+private objects public through an incorrectly configured storage bucket.
+
+20. Error messages and information disclosure
+
+Detailed error responses can reveal stack traces, SQL statements,
+filesystem paths, framework versions, or internal hostnames to an
+attacker. Return stable, minimal client-facing error messages and keep
+detailed diagnostics in access-controlled logs with a correlation ID.
+Ensure production debug modes are disabled and that reverse proxies do
+not expose upstream exception pages. Do not include tokens, secrets, or
+sensitive user data in exception messages or monitoring labels. Test
+common error paths, including invalid input and unexpected dependency
+responses, to ensure they do not leak internal implementation details.
+
+21. Security headers and TLS
+
+Security headers reduce certain browser risks but must be configured to
+match the application’s actual behavior. Use HTTPS everywhere, enable
+HSTS after confirming all relevant subdomains support HTTPS, and
+consider a tested Content Security Policy,
+X-Content-Type-Options: nosniff, and appropriate framing restrictions.
+Avoid copying a restrictive CSP blindly because it can break legitimate
+scripts or integrations and lead teams to weaken it later. Keep TLS
+certificates renewed, use supported protocol and cipher configurations,
+and validate the public endpoint rather than only checking the
+certificate file. Security headers complement input validation,
+authorization, and secure session handling; they do not replace them.
+
+22. Least privilege for service accounts
+
+A service account should have only the permissions necessary for its
+workload and should not share credentials with unrelated applications.
+Use separate identities for development, staging, production, and
+deployment automation, and restrict each identity to the appropriate
+resources. Remove unused roles and credentials, review access
+periodically, and monitor privilege changes. Prefer managed identity or
+short-lived federation over static secrets where supported. Test
+permission changes against expected application behavior so least
+privilege does not turn into broad emergency grants when a deployment
+fails.
+
+23. Security patching and emergency changes
+
+An urgent security fix may need to be deployed faster than the normal
+release cadence, but it still needs a controlled change record and
+verification. Confirm the affected component and exposure, apply the
+smallest supported patch or mitigation, run focused regression tests,
+and deploy through a trusted pipeline. If a full patch cannot be
+deployed immediately, restrict the vulnerable path and set a clear owner
+and deadline for removal of the mitigation. Verify the deployed version
+and monitor for exploitation indicators after release. Record the reason
+for emergency access and remove temporary privileges when the incident
+ends.
+
+24. Security incident closure
+
+An incident is not complete just because the suspicious activity
+stopped. Confirm containment, credential rotation, recovery of affected
+systems, log preservation, and whether data access or exfiltration is
+plausible. Identify the initial access path, the permissions that
+enabled impact, and why detection or prevention controls did not stop
+the event earlier. Track remediation work such as removing a vulnerable
+dependency, tightening IAM, improving alerts, or adding tests, each with
+an owner and due date. Share only verified findings with stakeholders
+and avoid speculative statements about attribution or scope.

@@ -1,0 +1,315 @@
+CLOUD.TXT — AZURE/AWS AND INFRASTRUCTURE FAILURES Practical
+troubleshooting notes for containers, scaling, networking, capacity, and
+rollback
+
+1.  Container crash loops
+
+A container that repeatedly starts and exits may be failing during
+application startup, receiving a termination signal, or being killed
+because it exceeds a resource limit. Inspect the current and previous
+container logs, exit code, restart count, and orchestrator events before
+changing the deployment. In Kubernetes, use
+kubectl describe pod POD_NAME and kubectl logs POD_NAME --previous to
+inspect the last failed instance. Exit code 137 commonly indicates
+SIGKILL and can be associated with an out-of-memory kill, while exit
+code 1 often points to an application error; neither code alone proves
+the cause. Check startup configuration, secrets, dependency
+reachability, and resource limits, then fix the failure rather than
+increasing restart frequency.
+
+2.  Out-of-memory kills
+
+An OOM kill occurs when a process or container exceeds the memory
+available under its limit or when the node is under memory pressure.
+Symptoms include abrupt termination, exit code 137, Kubernetes OOMKilled
+status, and memory usage that climbs during traffic spikes. Compare
+container memory usage with its limit, inspect heap or process profiles,
+and look for unbounded caches, large in-memory responses, or too much
+concurrency. Increasing the limit may be a valid short-term mitigation
+if the node has capacity, but it should not replace fixing a leak or
+oversized workload. Add memory alerts below the hard limit so the team
+has time to respond before the process is killed.
+
+3.  Health probes that cause restarts
+
+A failing liveness probe can cause a healthy-but-slow application to be
+restarted repeatedly, especially during startup or a temporary
+dependency slowdown. Liveness should normally test whether the process
+can continue running, while readiness determines whether it should
+receive traffic. Configure initialDelaySeconds, timeoutSeconds,
+periodSeconds, and failureThreshold based on measured startup time and
+realistic load. Do not make liveness depend on every downstream service;
+otherwise one remote outage can restart all application instances.
+Review pod events and probe response times before increasing thresholds,
+and test cold starts as well as steady-state behavior.
+
+4.  Readiness and deployment capacity
+
+A deployment can appear successful while the new instances are not ready
+to handle traffic. Readiness may fail because the app has not loaded
+configuration, cannot reach its database, or is still warming caches.
+During rolling updates, ensure enough old and new replicas can coexist
+and configure maxUnavailable and maxSurge deliberately. If every new pod
+fails readiness, pause or roll back the rollout instead of repeatedly
+forcing traffic to unhealthy instances. Monitor ready replica count,
+error rate, and latency during deployment rather than relying only on
+the deployment command’s exit status.
+
+5.  Autoscaling on the wrong metric
+
+Autoscaling may fail to protect a service when it tracks CPU but the
+real bottleneck is queue depth, request concurrency, memory, or database
+connections. CPU-based scaling will not help much if workers are idle
+while waiting on a remote service or if the database is already
+saturated. Choose a metric that correlates with user-visible demand and
+that additional replicas can actually improve, such as queue age for
+background workers or request concurrency for a stateless API. Set
+minimum and maximum replica counts based on baseline needs and
+downstream capacity. Test scaling under realistic traffic, including
+sudden bursts and dependency degradation, because adding replicas can
+overwhelm a shared database.
+
+6.  Cooldowns and scaling oscillation
+
+A scaling cooldown prevents the platform from reacting too aggressively
+to short-lived metric changes, but an excessively long cooldown can
+leave a service under-provisioned during sustained traffic. Too short a
+cooldown can produce oscillation, repeatedly adding and removing
+instances before the workload stabilizes. Examine the metric window,
+scale-out and scale-in rules, warm-up duration, and actual time needed
+for a new instance to become ready. Prefer faster scale-out and more
+conservative scale-in when traffic spikes are costly. Validate the
+policy with load tests and graphs of desired versus actual capacity, not
+only average CPU.
+
+7.  Cold starts
+
+A newly created container or serverless instance may take time to
+download images, initialize dependencies, open database connections, and
+warm caches. The result can be elevated latency or timeouts immediately
+after scale-out, especially for applications with large images or
+expensive startup hooks. Reduce image size, move unnecessary work out of
+startup, and avoid performing long migrations when each instance boots.
+Keep a suitable minimum warm capacity when traffic patterns justify the
+cost, and ensure health probes allow realistic initialization time.
+Track cold-start latency separately from normal request latency so a
+scaling problem is not misdiagnosed as a slow endpoint.
+
+8.  DNS failures
+
+A DNS problem often appears as intermittent connection errors even when
+the target service is healthy. Causes include an incorrect hostname,
+expired or stale DNS records, resolver failures, private-zone
+configuration errors, or clients caching old results too long. Test name
+resolution from the same container or subnet as the failing application,
+using tools such as nslookup, dig, or the platform’s diagnostic console.
+Confirm whether the resolved address is expected and whether the route
+and firewall rules allow traffic to it. Avoid hard-coding ephemeral IP
+addresses as a permanent fix; correct the DNS record, private DNS link,
+resolver path, or client cache behavior instead.
+
+9.  Security groups and network rules
+
+A service may be reachable from a developer laptop but blocked from the
+production subnet because the network path uses different firewall
+rules. Check both inbound and outbound rules, subnet network ACLs, route
+tables, private endpoints, and the source identity or address range.
+Allow only the required source and destination ports rather than opening
+broad ranges such as 0.0.0.0/0 to administrative services. Test
+connectivity from the actual workload environment and distinguish a TCP
+timeout from a connection refusal or DNS error. Make rule changes
+through reviewed infrastructure-as-code where possible so the fix is
+reproducible and auditable.
+
+10. Load balancer 502 errors
+
+A 502 generally means a proxy or load balancer received an invalid
+response from an upstream or could not successfully communicate with it,
+though exact meanings vary by product. The upstream may be crashing,
+speaking the wrong protocol, listening on a different port, or closing
+the connection before a valid response is returned. Compare load
+balancer logs with application logs and check target health, listener
+rules, backend port configuration, TLS settings, and recent deployment
+changes. Verify that the application binds to the expected interface and
+port rather than only to loopback inside the container. If only one
+target fails, drain or remove that target while investigating instead of
+changing the entire fleet.
+
+11. Load balancer 504 errors
+
+A 504 indicates that a gateway or proxy timed out waiting for an
+upstream response. Common causes include slow SQL, an external API
+stall, exhausted workers, or inconsistent timeout settings between the
+client, load balancer, web server, and application. Trace the request
+across each layer and compare their timeout values; the outer layer
+should generally allow enough time for the inner layer to return a
+controlled response, while still respecting the product’s overall
+deadline. Increasing every timeout can make requests occupy resources
+for too long. Fix the slow operation, add bounded dependency timeouts,
+and move long-running work to asynchronous processing when possible.
+
+12. TLS and certificate failures
+
+Expired, mismatched, or incomplete certificates can cause clients to
+reject connections even when the service is running. Check the
+certificate’s subject names, expiry date, chain, SNI configuration, and
+whether the load balancer is serving the intended certificate. Useful
+commands include
+openssl s_client -connect example.com:443 -servername example.com and
+openssl x509 -in certificate.pem -noout -dates -subject. Automate
+renewal and alert well before expiry, for example at 30, 14, and 7 days,
+and verify that the renewed certificate is actually deployed. Never work
+around a certificate error by disabling TLS verification in production
+clients.
+
+13. Disk full
+
+A full disk can prevent logs from being written, make containers fail,
+interrupt database operations, and stop deployments from unpacking
+images. Check filesystem usage with df -h and identify large directories
+with a controlled du scan, taking care not to run expensive scans on a
+severely overloaded host. Common causes include unrotated logs,
+container images, temporary exports, database files, and retained crash
+dumps. Free space through supported cleanup procedures, increase
+capacity if needed, and fix retention settings so the problem does not
+return. Do not manually delete active database files or unknown files
+under a container runtime’s storage directory.
+
+14. Region limits and quotas
+
+A deployment may fail even when the configuration is valid because the
+cloud account or region has reached a quota for CPUs, public IPs, load
+balancers, disks, or another resource. Look for explicit quota or
+capacity errors in deployment events and compare requested resources
+with regional limits. Reduce unnecessary allocations, request a quota
+increase, or use another supported region only after checking data
+residency, latency, dependencies, and disaster-recovery requirements.
+Quotas are separate from available physical capacity, so a request can
+fail even when the service normally offers that resource type. Monitor
+quota utilization and request increases before a planned scale-up or
+migration.
+
+15. Regional service degradation
+
+An outage in one region can affect compute, storage, networking,
+identity, or managed database services differently. Check the provider’s
+service health and resource health views, then determine whether the
+impact is regional, zonal, subscription-specific, or isolated to the
+application. Failover requires a tested architecture: replicated data,
+healthy capacity in the target region, working DNS or traffic routing,
+and valid secrets and certificates. Do not promote a replica or redirect
+all traffic without understanding replication lag and data consistency.
+Record the decision, expected data-loss window, and recovery steps in
+the incident timeline.
+
+16. Secret and configuration errors
+
+A container can crash or return 500 responses when an environment
+variable, managed identity permission, secret reference, or
+configuration key is missing. Compare the deployed configuration with
+the known-good version and verify that the workload identity can read
+only the required secret. Log the names of missing configuration keys,
+but never print secret values or full connection strings. Validate
+configuration at startup and fail with a clear, non-sensitive error
+rather than allowing obscure failures later in request handling. Use a
+secret manager and automated rotation where possible, and ensure the new
+value is available to the workload before revoking the old credential.
+
+17. Container image and startup failures
+
+A new image may fail because of an incorrect entrypoint, missing
+dependency, incompatible Python package, wrong CPU architecture, or a
+command that exits immediately. Compare the image digest and startup
+command with the previous working deployment, and run the image in a
+staging environment using production-like settings. Keep images
+reproducible and pin dependencies to known versions so builds do not
+unexpectedly change. Avoid placing migrations or one-time data
+transformations in every web container’s startup command, since multiple
+replicas may execute them simultaneously. Roll back to the previous
+known-good image if the new version causes widespread failures, then
+diagnose the build separately.
+
+18. Observability and alert quality
+
+An infrastructure dashboard should show whether the service is healthy
+from the user’s perspective, not merely whether virtual machines are
+running. Track request rate, error rate, latency percentiles,
+saturation, restart count, ready replicas, queue depth, and dependency
+health. Alert on sustained user impact and actionable symptoms rather
+than every short metric spike. Include runbook links and ownership in
+alerts, and verify that someone can distinguish a deployment failure
+from a regional outage using the available telemetry. Periodically test
+alerts and dashboards because an untested alert can fail during the
+incident when it is needed most.
+
+19. Rollback after a bad deployment
+
+When a release causes a sharp increase in errors, stop the rollout and
+compare the failing version with the last known-good version. In
+Kubernetes, kubectl rollout status deployment/api checks rollout
+progress and kubectl rollout undo deployment/api can restore a prior
+ReplicaSet when the deployment history supports it. In managed cloud
+platforms, use the equivalent revision or slot rollback procedure and
+confirm the actual image or package version afterward. Database changes
+must be backward-compatible; rolling back application code may not
+reverse a destructive schema migration or undo already completed
+external side effects. After rollback, verify health checks, error
+rates, latency, and a representative user flow before declaring
+recovery.
+
+20. Blue-green and canary releases
+
+A blue-green deployment runs old and new versions in separate
+environments and switches traffic when the new version is ready. A
+canary sends a small fraction of traffic to the new version so error
+rate and latency can be compared before expanding exposure. Both
+approaches reduce blast radius only when health metrics and rollback
+controls are reliable. Use explicit thresholds, such as a statistically
+meaningful rise in 5xx rate or p95 latency, and account for low traffic
+that makes small samples noisy. Keep database changes compatible with
+both versions while traffic overlaps, and verify background workers as
+well as web requests.
+
+21. Backups and restore testing
+
+A backup is useful only if it can be restored within the required
+recovery time and with an acceptable data-loss window. Define RPO and
+RTO, confirm retention and encryption, and test restores into an
+isolated environment on a schedule. Check that the backup includes
+required configuration, encryption keys, and dependencies, while keeping
+credentials separate and protected. Do not treat replication as a
+substitute for backup, because accidental deletion or corrupted data may
+replicate to the secondary. Document who can authorize restoration and
+how application traffic will be redirected after recovery.
+
+22. Queue backlog and worker capacity
+
+A queue that grows continuously means incoming work is exceeding
+processing capacity or workers are stalled on a dependency. Inspect
+queue depth, oldest-message age, processing time, retry count, and
+dead-letter volume rather than looking only at worker CPU. Add workers
+only if the downstream database and APIs can absorb the extra
+concurrency; otherwise scaling workers may increase failures and
+retries. Use bounded retries and dead-letter handling for poison
+messages, and make jobs idempotent so replay is safe. During an
+incident, pause nonessential producers or prioritize critical jobs if
+the platform supports it.
+
+23. Incident response sequence
+
+First establish impact, start time, affected region, and the most recent
+changes. Check provider health, application metrics, container events,
+networking, and dependency status in parallel, while preserving logs and
+timestamps. Choose a mitigation with a clear expected effect, such as
+rollback, draining one unhealthy target, pausing a backfill, or shifting
+traffic to a healthy region. Verify recovery through real requests and
+error-rate/latency metrics, not just a green deployment status.
+Afterward, write down the trigger, detection gap, resolution, and
+prevention work with owners and deadlines.
+
+Verified corrections from production feedback:
+Question: Our login endpoint returns 401 after the load balancer change.
+Correct answer: security + cloud
+
+Question: Our login endpoint returns 401 after the load balancer change.
+Correct answer: backend + database or cloud

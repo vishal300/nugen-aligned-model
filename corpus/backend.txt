@@ -1,0 +1,304 @@
+BACKEND.TXT — DJANGO AND API FAILURES Practical troubleshooting notes
+for Django, Gunicorn, and service-to-service APIs
+
+1.  Gunicorn worker timeouts
+
+A request that ends with a Gunicorn worker timeout usually means the
+worker did not finish handling a request within the configured limit,
+but the timeout itself does not identify the root cause. Common causes
+include a slow database query, an external HTTP call that never returns,
+expensive serialization, CPU-heavy work, or a deadlock in application
+code. Check the Gunicorn error log around the timeout and correlate the
+request with application logs, database activity, and dependency latency
+before increasing the timeout. The --timeout setting defaults to 30
+seconds in many Gunicorn configurations; raising it can be appropriate
+for a known long operation, but it can also allow stuck workers to
+consume capacity for longer. For example, start the service with
+gunicorn config.wsgi:application --workers 4 --timeout 30 --access-logfile - --error-logfile -
+and measure which route is slow.
+
+2.  Slow Django views
+
+A view can be slow even when it returns a small response because it may
+perform too much work before responding. Look for repeated ORM calls,
+large in-memory transformations, synchronous calls to third-party
+services, and template or serializer code that touches related objects.
+Add structured timing around major operations and record the route,
+status code, request ID, and dependency durations without logging
+secrets or sensitive request bodies. If a request needs to process
+thousands of records, move the work to a background queue such as Celery
+and return a task identifier rather than holding an HTTP connection
+open. Use a profiler or tracing system to identify the slow section
+instead of optimizing based on guesswork.
+
+3.  N+1 queries
+
+An N+1 problem occurs when code loads a list of records and then runs
+another query for each record to retrieve a related object. For example,
+iterating over 100 orders and reading order.customer.name can produce
+one query for the orders plus up to 100 customer queries. The symptom is
+a query count that grows with the number of returned objects and a view
+that gets slower as the page size increases. Use
+select_related("customer") for foreign-key and one-to-one relationships,
+because Django can retrieve those related rows in a SQL join. Use
+prefetch_related("items") for reverse foreign-key and many-to-many
+relationships, where Django runs a separate query and joins the results
+in Python; verify the improvement with Django Debug Toolbar in
+development or query metrics in a safe test environment.
+
+4.  Choosing select_related versus prefetch_related
+
+select_related() is best for single-valued relationships such as
+ForeignKey and OneToOneField, because a join avoids a query per row.
+prefetch_related() is intended for collections, including many-to-many
+relations and reverse foreign keys, and usually executes a second query
+for the related collection. Choosing the wrong tool can increase the
+amount of data returned or fail to optimize the relationship you
+actually access. For example,
+Order.objects.select_related("customer").prefetch_related("items") may
+be appropriate when the response needs both the customer and each
+order’s items. Inspect the generated SQL and response payload size;
+prefetching a huge collection that the response barely uses can consume
+more memory than it saves in query time.
+
+5.  Unhandled exceptions and HTTP 500 responses
+
+A 500 response means the server encountered an error it did not handle
+successfully; it does not necessarily mean the database is at fault.
+Check the traceback, request ID, route, deployment version, and
+timestamp, then look for the first application frame that points to your
+code rather than focusing only on the final exception line. Common
+causes include None values where an object was expected, missing
+environment settings, unexpected external API responses, serialization
+errors, and database constraint violations. In Django, configure
+application logging to send errors to the process output or your
+centralized logging system, and ensure production has DEBUG = False so
+stack traces and settings are not exposed to users. Reproduce the
+failure with a sanitized test case and add a regression test after
+fixing the underlying cause.
+
+6.  Reading production logs
+
+Logs are useful only when events can be connected across components.
+Include a timestamp, severity, service name, deployment version, request
+or correlation ID, route, status code, and elapsed time in structured
+logs. At an incident, search a narrow time range around a failing
+request and compare application errors with Gunicorn, database, and
+dependency logs. Avoid writing access tokens, passwords, session
+cookies, full authorization headers, or sensitive customer data into
+logs, because log access is often broader than production database
+access. A useful command for a containerized service is
+kubectl logs deployment/api --since=15m; add --previous when
+investigating a container that restarted and its prior logs are still
+available.
+
+7.  External calls that block requests
+
+A synchronous call to a payment, identity, or inventory service can hold
+a web worker while the remote system is slow. Configure explicit connect
+and read timeouts on HTTP clients; a connection timeout alone does not
+bound the time spent waiting for the response body. Set timeout values
+according to the service’s latency budget, and record remote status
+codes and elapsed time so dependency slowness is distinguishable from
+local processing. For example, with Requests use
+requests.get(url, timeout=(2, 5)) to allow up to roughly two seconds to
+connect and five seconds to read between bytes, subject to library
+behavior. For non-urgent work, use a queue; for user-facing work, return
+a controlled error when the dependency exceeds its budget instead of
+tying up workers indefinitely.
+
+8.  Worker count and worker type
+
+Too few Gunicorn workers can limit throughput, while too many can
+exhaust memory and make the entire service unstable. Measure CPU,
+resident memory, request latency, and worker restarts under realistic
+load before changing worker counts. A common starting point is a small
+number of workers based on available CPU and memory, followed by load
+testing; formulas such as 2 * CPU cores + 1 are only rough starting
+heuristics, not universal rules. A synchronous worker is suitable for
+many conventional Django workloads, while asynchronous or threaded
+workers require compatible code and careful testing of libraries that
+block. Track the number of busy workers and request queueing so that
+adding workers addresses a measured bottleneck rather than masking slow
+dependencies.
+
+9.  Retries between microservices
+
+Retries help with transient failures such as a brief connection reset,
+but they can amplify an outage when every caller repeatedly retries an
+overloaded service. Retry only errors that are plausibly temporary, cap
+the attempt count, use exponential backoff with jitter, and respect a
+total request deadline. For example, delays around 200 ms, 400 ms, and
+800 ms with random jitter may be reasonable for a short internal
+operation, but the exact values should follow the service’s latency
+budget. Do not retry validation errors or ordinary authorization
+failures, and be careful with requests that might have already succeeded
+remotely before the connection failed. Monitor retry rate as an
+operational metric; a sudden rise often signals a failing dependency
+rather than a need for more retries.
+
+10. Idempotency for write requests
+
+A client may retry a POST after a timeout even though the server
+completed the first attempt, causing duplicate payments, orders, or
+jobs. Make important write operations idempotent by accepting an
+idempotency key and storing the result associated with that key under a
+uniqueness constraint. When the same key is received again, return the
+prior result rather than repeating the side effect; define how long keys
+are retained and what happens if the same key is reused with a different
+payload. For example, store a unique (customer_id, idempotency_key) pair
+in the database and create the business record in the same transaction.
+Idempotency does not mean every HTTP method is automatically safe to
+repeat, so document the guarantee for each endpoint.
+
+11. Circuit breakers
+
+A circuit breaker temporarily stops calls to a dependency after repeated
+failures, giving that dependency time to recover and preventing local
+workers from being consumed by requests that are unlikely to succeed. A
+typical breaker has closed, open, and half-open states: it allows normal
+calls, rejects calls during the open interval, then permits a small test
+sample. Set thresholds using real failure rates and latency, and make
+the fallback behavior explicit, such as serving cached data or returning
+a clear 503 response. A circuit breaker is not a replacement for
+timeouts, bounded retries, or capacity planning. Log state changes and
+expose breaker state as a metric so operators can see why requests are
+being rejected.
+
+12. Handling duplicate background jobs
+
+Background queues can deliver a task more than once, especially when a
+worker performs a side effect and crashes before acknowledging
+completion. Tasks should therefore be safe to run repeatedly or should
+claim work using a durable state transition. For example, update a job
+from pending to processing with a conditional database update, then
+record a completed result using a unique business key. Keep tasks
+bounded and set retry policies that distinguish transient infrastructure
+failures from permanent invalid input. Monitor queue depth, task age,
+retry count, and dead-letter volume; a growing queue can reveal worker
+saturation even while the HTTP API still appears healthy.
+
+13. Django transaction boundaries
+
+A transaction that includes slow network calls can hold database locks
+for much longer than necessary. Keep database transactions focused on
+database changes, commit before making external calls where the workflow
+permits, and use an outbox or durable job record when a change must
+trigger a message reliably. Use transaction.atomic() to group related
+database writes and understand that nested atomic blocks may use
+savepoints rather than independent commits. Do not catch and suppress
+database exceptions inside an atomic block and then continue as if the
+transaction were healthy. Test failure cases to ensure partial updates
+cannot leave related rows inconsistent.
+
+14. API validation and unexpected payloads
+
+An endpoint can fail when a client sends missing fields, incorrect
+types, oversized arrays, or a response shape that the server did not
+anticipate. Validate inputs at the boundary using Django REST Framework
+serializers, return a consistent 400 response for invalid client data,
+and reserve 500 responses for unexpected server failures. Set limits on
+upload sizes, list lengths, pagination sizes, and nested object depth
+where applicable. For example, cap a page-size parameter at 100 rather
+than allowing an arbitrary request to serialize millions of rows. Do not
+expose internal exception messages to clients; log the technical details
+securely and return a stable error code and correlation ID.
+
+15. Authentication failures versus authorization failures
+
+A 401 generally indicates that valid authentication credentials are
+missing or unacceptable, while a 403 indicates that the caller is
+authenticated but is not permitted to perform the action, though
+framework and authentication-scheme details can affect exact behavior.
+Check token expiry, issuer, audience, signature validation, clock
+synchronization, and the permissions assigned to the user or service
+principal. In Django REST Framework, inspect the configured
+authentication classes and permission classes before changing endpoint
+code. Avoid solving a 403 by broadly disabling permission checks;
+instead, verify the intended role or scope and add a test for both
+allowed and denied access.
+
+16. Database connection leaks
+
+A view or task that leaves cursors or connections open can gradually
+exhaust the database connection limit. Use Django’s connection
+management correctly, close manually created cursors in finally blocks
+or context managers, and inspect long-running tasks that reuse database
+connections for hours. CONN_MAX_AGE controls persistent connection
+reuse, but setting it too high can preserve stale connections and
+increase total connection use across many workers. Compare application
+worker count with database connection capacity and use a pooler when
+appropriate. During an incident, check PostgreSQL’s pg_stat_activity for
+idle-in-transaction sessions and unusually old queries rather than
+blindly restarting every service.
+
+17. Memory leaks in long-running workers
+
+A worker whose memory steadily grows across many requests may retain
+references to large querysets, cached objects, file buffers, or global
+data structures. Compare memory after a controlled workload and inspect
+whether usage returns to a stable baseline after requests complete.
+Stream large exports instead of constructing giant lists, iterate over
+querysets with an appropriate iterator() strategy, and avoid unbounded
+in-process caches. Gunicorn’s --max-requests and --max-requests-jitter
+can recycle workers as a containment measure, but recycling does not fix
+the leak itself. Record memory metrics per process and investigate the
+code path responsible for the growth.
+
+18. Safe deployment migrations
+
+A deployment may fail when application code expects a column that has
+not been added, or when a migration locks a busy table for too long. Use
+an expand-and-contract sequence: add a backward-compatible nullable
+column, deploy code that can work with both schemas, backfill in
+batches, then enforce constraints or remove old columns in a later
+release. Review generated migrations and run them against a
+production-sized staging copy where possible. Keep schema changes
+separate from long application startup work, and define a rollback plan
+that does not assume a destructive migration can be reversed safely.
+Monitor migration duration, lock waits, and application errors during
+rollout.
+
+19. Health checks and readiness
+
+A process can be running while the API is unable to serve requests
+because the database is unavailable or initialization has not finished.
+Use a liveness check to detect a process that is irrecoverably stuck and
+a readiness check to decide whether it should receive traffic. Avoid
+making liveness depend on every external service, since one dependency
+outage could cause all containers to restart repeatedly. A readiness
+endpoint may perform a lightweight database check with a short timeout,
+while deeper dependency checks can be exposed separately for monitoring.
+Verify probe intervals, timeout seconds, and failure thresholds so
+transient slowdowns do not create restart loops.
+
+20. Incident triage checklist
+
+Start by establishing scope: which routes, customers, regions, and
+versions are affected, and when the issue began. Compare recent
+deployments and configuration changes with request latency, error rate,
+saturation, and dependency metrics. Use a request ID to follow one
+failure through the API, database, queue, and downstream services; avoid
+changing multiple variables at once because it obscures the cause. If
+customer impact is severe, mitigate first through rollback, traffic
+reduction, or disabling a nonessential feature, then perform root-cause
+analysis after service is stable. Finish with an owner, a corrective
+action, and a regression or alerting improvement.
+
+
+Verified corrections from production feedback:
+Question: An API key was committed to a public repo. What should I do first?
+Correct answer: security
+
+Question: An API key was committed to a public repo. What should I do first?
+Correct answer: security
+
+Question: After we moved to Azure, our Django app times out on database queries
+Correct answer: backend + database or cloud
+
+Verified corrections from production feedback:
+Question: An API key was committed to a public repo. What should I do first?
+Correct answer: security
+
+Question: My container keeps restarting with exit code 137. What does that mean?
+Correct answer: cloud
