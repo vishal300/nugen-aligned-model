@@ -1,0 +1,9 @@
+{
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "experts": [
+    {"name": "backend",  "description": "Python/Django backend, APIs, microservices",   "corpus": "corpus/backend.txt"},
+    {"name": "database", "description": "SQL, indexing, query performance, migrations", "corpus": "corpus/database.txt"},
+    {"name": "cloud",    "description": "Azure/AWS, containers, networking, scaling",   "corpus": "corpus/cloud.txt"},
+    {"name": "security", "description": "Authn/authz, secrets, vulnerabilities",        "corpus": "corpus/security.txt"}
+  ]
+}

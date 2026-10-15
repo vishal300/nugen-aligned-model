@@ -1,0 +1,71 @@
+{
+  "experts": {
+    "backend": {
+      "document_ids": [
+        "document_01m4z13swazeme4y"
+      ],
+      "benchmark_id": "benchmark_01m4xk103r6p0e2j",
+      "alignment_id": "alignment_01m4xk1ajptd18tp",
+      "model_id": "model_01m4xk3m206jm57w",
+      "active_model": "model_01m4z16bsj8rv77w",
+      "version": 2,
+      "history": [
+        {
+          "version": 2,
+          "old": 0.08401581859243398,
+          "new": 0.10654279887535738,
+          "promoted": true,
+          "model": "model_01m4z16bsj8rv77w"
+        }
+      ],
+      "used_feedback": [
+        "d8fb4ed94ca0",
+        "8bef14dccd0c",
+        "48c5416cb9db"
+      ]
+    },
+    "database": {
+      "document_ids": [
+        "document_01m4xk63p3mc9m18"
+      ],
+      "benchmark_id": "benchmark_01m4xk6e1g0amzpc",
+      "alignment_id": "alignment_01m4xk6rh38v0ae0",
+      "model_id": "model_01m4xk93pfy7h4r0",
+      "active_model": "model_01m4xk93pfy7h4r0",
+      "version": 1
+    },
+    "cloud": {
+      "document_ids": [
+        "document_01m4z1x096ygge8d"
+      ],
+      "benchmark_id": "benchmark_01m4xkbsyk2tjjan",
+      "alignment_id": "alignment_01m4xkc4db6dhkb9",
+      "model_id": "model_01m4xkefyvfw5xwn",
+      "active_model": "model_01m4z1znakasjbdr",
+      "version": 2,
+      "history": [
+        {
+          "version": 2,
+          "old": 0.056915632282365125,
+          "new": 0.05985222179107221,
+          "promoted": true,
+          "model": "model_01m4z1znakasjbdr"
+        }
+      ],
+      "used_feedback": [
+        "deb8d12f1849",
+        "501a7edfa790"
+      ]
+    },
+    "security": {
+      "document_ids": [
+        "document_01m4xkgvj1yntw9k"
+      ],
+      "benchmark_id": "benchmark_01m4xkh5xhxvh2aw",
+      "alignment_id": "alignment_01m4xkhgg0chn49k",
+      "model_id": "model_01m4xkkv01zmz0ef",
+      "active_model": "model_01m4xkkv01zmz0ef",
+      "version": 1
+    }
+  }
+}
